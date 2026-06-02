@@ -1,0 +1,9 @@
+streamlit
+torch
+torchvision
+numpy
+opencv-python-headless
+pandas
+pydicom
+matplotlib
+gdown
