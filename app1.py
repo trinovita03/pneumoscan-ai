@@ -1,5 +1,6 @@
 import streamlit as st
 
+# 1. Konfigurasi Halaman (Harus di paling atas)
 st.set_page_config(
     page_title="PneumoScan AI Dashboard",
     page_icon="🫁",
@@ -99,14 +100,15 @@ def visualize_with_gt(image, gt_boxes=None, pred_boxes=None, scores=None, thr=0.
     fig, ax = plt.subplots(1, figsize=(8,8))
     ax.imshow(image, cmap='gray')
 
-#Ground Truth
+    # Ground Truth
     if gt_boxes is not None:
         for i, box in enumerate(gt_boxes):
             x,y,w,h = box
             ax.add_patch(patches.Rectangle((x,y), w,h,
                                            linewidth=3, edgecolor='#00FF00', facecolor='none'))
             ax.text(x, y-5, f"GT {i}", color='#00FF00', fontsize=12, weight='bold')
-  #Prediksi
+            
+    # Prediksi
     if pred_boxes is not None:
         idx = 0
         for box, score in zip(pred_boxes, scores):
@@ -121,7 +123,7 @@ def visualize_with_gt(image, gt_boxes=None, pred_boxes=None, scores=None, thr=0.
     return fig
 
 # =======================
-# UI 
+# UI CUSTOM STYLING
 # =======================
 st.markdown("""
 <style>
@@ -138,21 +140,23 @@ section[data-testid="stSidebar"] * {
     border-radius: 16px;
     text-align: center;
     color: white;
+    margin-bottom: 2rem;
 }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""
-<div class="header-box">
-<h1>🫁 PneumoScan AI</h1>
-<h4>Sistem Deteksi Pneumonia Berbasis Deep Learning</h4>
-</div>
-""", unsafe_allow_html=True)
 
 # =======================
-# SIDEBAR
+# SIDEBAR / NAVIGASI
 # =======================
 st.sidebar.header("📌 Navigasi")
+
+# Menu Pilihan Halaman Utama & Tambahan Revisi
+menu_pilihan = st.sidebar.radio(
+    "Pilih Halaman:",
+    ["🔍 Deteksi Pneumonia", "📖 Tata Cara Penggunaan", "ℹ️ Tentang Sistem"]
+)
+
 show_gt = st.sidebar.checkbox("Tampilkan Ground Truth", True)
 
 if df_gt is not None:
@@ -163,115 +167,169 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.info("🔬 Faster R-CNN + EfficientNet-B0")
 
-# =======================
-# UPLOAD
-# =======================
-st.subheader("📤 Upload Citra X-ray")
-uploaded_file = st.file_uploader("Upload", type=["jpg","png","jpeg","bmp","dcm"])
 
-if uploaded_file:
-    start_total = time.perf_counter()
+# ==============================================================================
+# ROUTING HALAMAN
+# ==============================================================================
 
-    # LOAD IMAGE
-    if uploaded_file.name.endswith(".dcm"):
-        ds = pydicom.dcmread(uploaded_file)
-        img = ds.pixel_array.astype(np.float32)
-        img = (img / img.max() * 255).astype(np.uint8)
+# --- HALAMAN 1: DETEKSI PNEUMONIA (TAMPILAN UTAMA ASLI KAMU) ---
+if menu_pilihan == "🔍 Deteksi Pneumonia":
+    
+    # Banner Header Tetap Tampil di Halaman Utama Deteksi
+    st.markdown("""
+    <div class="header-box">
+    <h1>🫁 PneumoScan AI</h1>
+    <h4>Sistem Deteksi Pneumonia Berbasis Deep Learning</h4>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.subheader("📤 Upload Citra X-ray")
+    uploaded_file = st.file_uploader("Upload", type=["jpg","png","jpeg","bmp","dcm"])
+
+    if uploaded_file:
+        start_total = time.perf_counter()
+
+        # LOAD IMAGE
+        if uploaded_file.name.endswith(".dcm"):
+            ds = pydicom.dcmread(uploaded_file)
+            img = ds.pixel_array.astype(np.float32)
+            img = (img / img.max() * 255).astype(np.uint8)
+        else:
+            file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+            img = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
+
+        img_tensor = torch.tensor(img).float().unsqueeze(0) / 255.0
+        img_display = cv2.resize(img, (1024,1024))
+        img_display = apply_clahe_gray(img_display)
+
+        # INFERENCE
+        start_inference = time.perf_counter()
+
+        with torch.no_grad():
+            outputs = model([img_tensor.to(device)])
+
+        p_boxes, p_scores = soft_nms(outputs[0]['boxes'], outputs[0]['scores'])
+        p_boxes = p_boxes.cpu().numpy()
+        p_scores = p_scores.cpu().numpy()
+
+        end_inference = time.perf_counter()
+        inference_time = end_inference - start_inference
+
+        # SCALE BOX
+        h,w = img.shape
+        p_boxes[:, [0,2]] *= (1024/w)
+        p_boxes[:, [1,3]] *= (1024/h)
+
+        # GT
+        gt_boxes = None
+        if show_gt and df_gt is not None:
+            pid = uploaded_file.name.split('.')[0]
+            rows = df_gt[df_gt['patientId'] == pid]
+            if not rows.empty:
+                gt_boxes = rows[['x','y','width','height']].values
+
+        # DETECTION
+        threshold = 0.5
+        detected = False
+        bbox_pred_list = []
+
+        for i in range(len(p_scores)):
+            if p_scores[i] >= threshold:
+                detected = True
+                x1,y1,x2,y2 = p_boxes[i]
+                bbox_pred_list.append({
+                    "patientId": uploaded_file.name,
+                    "x": round(float(x1),2),
+                    "y": round(float(y1),2),
+                    "width": round(float(x2-x1),2),
+                    "height": round(float(y2-y1),2)
+                })
+
+        # VISUAL
+        col1, col2 = st.columns([2,1])
+
+        with col1:
+            fig = visualize_with_gt(img_display, gt_boxes, p_boxes, p_scores, threshold)
+            st.pyplot(fig)
+            st.caption("🟢 Ground Truth | 🔴 Prediksi AI")
+
+        with col2:
+            if detected:
+                st.error("⚠️ Area Indikasi Pneumonia Ditemukan")
+            else:
+                st.success("Tidak ditemukan area indikasi pneumonia")
+
+        end_total = time.perf_counter()
+        total_time = end_total - start_total
+
+        print(f"DEBUG [{uploaded_file.name}] Inference: {inference_time:.3f}s | Total: {total_time:.3f}s")
+
+        # TABEL 
+        st.markdown("---")
+        c1, c2 = st.columns(2)
+
+        with c1:
+            st.subheader("📊 Tabel Prediksi AI")
+            if bbox_pred_list:
+                st.dataframe(pd.DataFrame(bbox_pred_list), use_container_width=True)
+            else:
+                st.info("Tidak ada prediksi")
+
+        with c2:
+            st.subheader("🟢 Ground Truth")
+            if gt_boxes is not None:
+                st.dataframe(pd.DataFrame(gt_boxes, columns=['x','y','width','height']), use_container_width=True)
+            else:
+                st.info("Tidak tersedia")
+
     else:
-        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        img = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
+        st.warning("Silakan upload gambar terlebih dahulu.")
 
 
-    img_tensor = torch.tensor(img).float().unsqueeze(0) / 255.0
-    img_display = cv2.resize(img, (1024,1024))
-    img_display = apply_clahe_gray(img_display)
+# --- HALAMAN 2: REVISI TATA CARA PENGGUNAAN ---
+elif menu_pilihan == "📖 Tata Cara Penggunaan":
+    st.title("📖 Tata Cara Penggunaan PneumoScan AI")
+    st.write("Ikuti panduan di bawah ini untuk mengoperasikan sistem deteksi:")
+    
+    with st.expander("Langkah 1: Persiapan Berkas Citra X-ray", expanded=True):
+        st.write("Pastikan data rekam radiologi dada (Chest X-ray) pasien tersedia dalam format standar **JPG, JPEG, PNG, BMP**, atau format medis **DCM (DICOM)**.")
+        
+    with st.expander("Langkah 2: Proses Unggah Dokumen", expanded=True):
+        st.write("Akses menu navigasi **🔍 Deteksi Pneumonia**, lalu gunakan area seret-taruh atau klik **'Browse files'** pada bagian unggah untuk memuat citra medis.")
+        
+    with st.expander("Langkah 3: Pembacaan Hasil Analisis", expanded=True):
+        st.write("Tunggu beberapa saat hingga model AI selesai memproses gambar. Indikasi pneumonia akan ditandai dengan kotak pembatas (**🔴 Bounding Box**) beserta visualisasi perbandingan dengan data **🟢 Ground Truth** (jika diaktifkan).")
 
-    # INFERENCE
-    start_inference = time.perf_counter() # Mulai ukur model
 
-    with torch.no_grad():
-        outputs = model([img_tensor.to(device)])
+# --- HALAMAN 3: REVISI TENTANG SISTEM (ABOUT) ---
+elif menu_pilihan == "ℹ️ Tentang Sistem":
+    st.title("ℹ️ Tentang Sistem PneumoScan AI")
+    
+    st.markdown("""
+    ### 🫁 Latar Belakang Proyek
+    Sistem **PneumoScan AI** diimplementasikan guna mendeteksi keberadaan objek opasitas paru yang mengindikasikan penyakit Pneumonia melalui pencitraan X-ray dada.
+    
+    ### 🛠️ Spesifikasi Arsitektur & Dataset
+    * **Algoritma Utama:** Faster R-CNN (Region-based Convolutional Neural Network)
+    * **Ekstraktor Fitur / Backbone:** EfficientNet-B0
+    * **Metode Kontras Gambar:** CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    * **Dataset Referensi:** RSNA Pneumonia Detection Challenge
+    """)
+    
+    st.divider()
+    st.subheader("👨‍💻 Identitas Pengembang")
+    
+    col_img, col_txt = st.columns([1, 5])
+    with col_img:
+        st.image("foto_aku.png", width=110)
+    with col_txt:
+        st.markdown("""
+        **TRI NOVITA** Jurusan Teknik Informatika  
+        Universitas Lampung  
+        
+        *Sistem aplikasi dashboard ini dibangun menggunakan kerangka kerja Streamlit dan backend Deep Learning berbasis PyTorch sebagai bagian dari visualisasi hasil tugas akhir/penelitian.*
+        """)
 
-    p_boxes, p_scores = soft_nms(outputs[0]['boxes'], outputs[0]['scores'])
-    p_boxes = p_boxes.cpu().numpy()
-    p_scores = p_scores.cpu().numpy()
-
-    end_inference = time.perf_counter() # Selesai ukur model
-    inference_time = end_inference - start_inference
-
-    # SCALE BOX
-    h,w = img.shape
-    p_boxes[:, [0,2]] *= (1024/w)
-    p_boxes[:, [1,3]] *= (1024/h)
-
-    # GT
-    gt_boxes = None
-    if show_gt and df_gt is not None:
-        pid = uploaded_file.name.split('.')[0]
-        rows = df_gt[df_gt['patientId'] == pid]
-        if not rows.empty:
-            gt_boxes = rows[['x','y','width','height']].values
-
-    # DETECTION
-    threshold = 0.5
-    detected = False
-    bbox_pred_list = []
-
-    for i in range(len(p_scores)):
-        if p_scores[i] >= threshold:
-            detected = True
-            x1,y1,x2,y2 = p_boxes[i]
-            bbox_pred_list.append({
-                "patientId": uploaded_file.name,
-                "x": round(float(x1),2),
-                "y": round(float(y1),2),
-                "width": round(float(x2-x1),2),
-                "height": round(float(y2-y1),2)
-            })
-
-    # =======================
-    # VISUAL
-    # =======================
-    col1, col2 = st.columns([2,1])
-
-    with col1:
-        fig = visualize_with_gt(img_display, gt_boxes, p_boxes, p_scores, threshold)
-        st.pyplot(fig)
-        st.caption("🟢 Ground Truth | 🔴 Prediksi AI")
-
-    with col2:
-        if detected:
-            st.error("⚠️ Area Indikasi Pneumonia Ditemukan")
-        else:
-            st.success("Tidak ditemukan area indikasi pneumonia")
-
-    end_total = time.perf_counter()
-    total_time = end_total - start_total
-
-    print(f"DEBUG [{uploaded_file.name}] Inference: {inference_time:.3f}s | Total: {total_time:.3f}s")
-
-    # =======================
-    # TABEL 
-    # =======================
-    st.markdown("---")
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.subheader("📊 Tabel Prediksi AI")
-        if bbox_pred_list:
-            st.dataframe(pd.DataFrame(bbox_pred_list), use_container_width=True)
-        else:
-            st.info("Tidak ada prediksi")
-
-    with c2:
-        st.subheader("🟢 Ground Truth")
-        if gt_boxes is not None:
-            st.dataframe(pd.DataFrame(gt_boxes, columns=['x','y','width','height']), use_container_width=True)
-        else:
-            st.info("Tidak tersedia")
-
-else:
-    st.warning("Silakan upload gambar terlebih dahulu.")
-
+# Footer universal (Selalu muncul di bagian paling bawah halaman manapun)
 st.markdown("---")
 st.markdown("<div style='text-align:center;color:gray;'>© 2026 PneumoScan AI</div>", unsafe_allow_html=True)
